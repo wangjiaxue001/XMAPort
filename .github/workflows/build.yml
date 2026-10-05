@@ -20,16 +20,51 @@ on:
         required: false
         type: string
 
+# 同一分支的移植任务串行，避免两次 2 小时级的构建互相抢磁盘
+concurrency:
+  group: xmaport-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   porting:
     if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     permissions:
       contents: write
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Report disk space (before)
+        shell: pwsh
+        run: Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      # windows-latest 预装了一堆用不到的 SDK；两个完整 ROM + 解包后分区很容易超过 30GB
+      - name: Free disk space
+        shell: pwsh
+        run: |
+          $targets = @(
+            'C:\Android',
+            'C:\hostedtoolcache\windows\node',
+            'C:\hostedtoolcache\windows\Ruby',
+            'C:\hostedtoolcache\windows\PyPy',
+            'C:\hostedtoolcache\windows\go',
+            'C:\Program Files\Google\Chrome',
+            'C:\Program Files\Microsoft SDKs',
+            "$env:USERPROFILE\.gradle",
+            "$env:USERPROFILE\.m2",
+            "$env:USERPROFILE\.nuget",
+            "$env:USERPROFILE\.rustup",
+            "$env:USERPROFILE\.cargo"
+          )
+          foreach ($t in $targets) {
+            if (Test-Path $t) {
+              try { Remove-Item -Recurse -Force $t -ErrorAction Stop; Write-Host "removed $t" }
+              catch { Write-Host "skip $t ($($_.Exception.Message))" }
+            }
+          }
+          Get-PSDrive C | Select-Object @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
 
       - uses: actions/setup-python@v6
         with:
@@ -39,6 +74,16 @@ jobs:
         shell: pwsh
         run: pip install Brotli
 
+      # 先花 1 秒拦住最容易白跑 2 小时的情况：
+      # pack_super=false 时不生成 super.img，最后一步必然 exit 1
+      - name: Preflight check (config.ini)
+        shell: pwsh
+        run: |
+          python -c "import pathlib,re,sys;t=pathlib.Path('config.ini').read_text(encoding='gbk',errors='ignore');m=re.search(r'^pack_super\s*=\s*(\S+)',t,re.M);v=(m.group(1) if m else 'false').lower();print('config.ini pack_super =',v);sys.exit(0 if v=='true' else 1)"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "config.ini 里 pack_super 不是 true：脚本不会生成 super.img，后面的压缩步骤必然失败。先把它改成 true 再跑。"
+          }
+
       - name: Run XMAPort
         shell: pwsh
         run: |
@@ -46,6 +91,18 @@ jobs:
           if ("${{ inputs.source }}") { $args += "--source"; $args += "${{ inputs.source }}" }
           if ("${{ inputs.target }}") { $args += "--target"; $args += "${{ inputs.target }}" }
           python XMAPort.py @args
+
+      # 失败也要留下日志和 rom_info.txt，否则 2 小时后什么都看不到
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xmaport-logs-${{ inputs.device }}
+          path: |
+            workspace/*.log
+            workspace/rom_info.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Compress and split super.img
         shell: pwsh
@@ -81,7 +138,8 @@ jobs:
           gh release create $tag $allFiles --title "XMAPort ${{ inputs.device }} $date #$n" --notes $notes --latest
 
   build:
-    if: github.event_name == 'push'
+    # 提交信息里带 [skip release] 就不发包，方便只改配置/工具链的提交
+    if: github.event_name == 'push' && !contains(github.event.head_commit.message, '[skip release]')
     runs-on: windows-latest
     permissions:
       contents: write
