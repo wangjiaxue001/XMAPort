@@ -78,11 +78,7 @@ jobs:
       # pack_super=false 时不生成 super.img，最后一步必然 exit 1
       - name: Preflight check (config.ini)
         shell: pwsh
-        run: |
-          python -c "import pathlib,re,sys;t=pathlib.Path('config.ini').read_text(encoding='gbk',errors='ignore');m=re.search(r'^pack_super\s*=\s*(\S+)',t,re.M);v=(m.group(1) if m else 'false').lower();print('config.ini pack_super =',v);sys.exit(0 if v=='true' else 1)"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "config.ini 里 pack_super 不是 true：脚本不会生成 super.img，后面的压缩步骤必然失败。先把它改成 true 再跑。"
-          }
+        run: python .github/scripts/preflight.py
 
       - name: Run XMAPort
         shell: pwsh
@@ -91,6 +87,15 @@ jobs:
           if ("${{ inputs.source }}") { $args += "--source"; $args += "${{ inputs.source }}" }
           if ("${{ inputs.target }}") { $args += "--target"; $args += "${{ inputs.target }}" }
           python XMAPort.py @args
+
+      # 只列不删：即便这次没装下 super，也能拿到"源分区里谁最占地方"的清单，
+      # 下一轮就能按名字精准瘦身
+      - name: Report source tree sizes
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path workspace | Out-Null
+          python .github/scripts/report_sizes.py 2>&1 | Tee-Object -FilePath workspace/size-report.txt
 
       # 失败也要留下日志和 rom_info.txt，否则 2 小时后什么都看不到
       - name: Upload logs
@@ -101,6 +106,7 @@ jobs:
           path: |
             workspace/*.log
             workspace/rom_info.txt
+            workspace/size-report.txt
           if-no-files-found: ignore
           retention-days: 14
 
