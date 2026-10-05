@@ -131,7 +131,9 @@ jobs:
           $volFiles = @(Get-ChildItem "workspace\super-${{ inputs.device }}.7z.*" | ForEach-Object { $_.FullName })
           if (-not $volFiles) { Write-Error "no split volumes found"; exit 1 }
           $logFiles = @(Get-ChildItem "workspace\*.log" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-          $allFiles = $volFiles + $logFiles
+          # vbmeta 只有几十 KB，但不一起刷 AVB 校验收不过（解锁后仍会拦），必须随包发布
+          $vbFiles = @(Get-ChildItem "workspace\packed\vbmeta*.img" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+          $allFiles = $volFiles + $logFiles + $vbFiles
 
           $romInfo = @("ROM Info:")
           if (Test-Path workspace\rom_info.txt) {
@@ -139,7 +141,7 @@ jobs:
           } else {
             $romInfo += "device: ${{ inputs.device }}"
           }
-          $notes = "移植输出（分卷 7z，每卷 <=2GB）。`n`n" + ($romInfo -join "`n") + "`n`n合并解压：`n7z x super-${{ inputs.device }}.7z.001"
+          $notes = "移植输出（分卷 7z，每卷 <=2GB）。`n`n" + ($romInfo -join "`n") + "`n`n合并解压：`n7z x super-${{ inputs.device }}.7z.001`n`n刷写：`nfastboot flash super super.img`nvbmeta*.img 若附带则一起刷（AVB 禁验）：`nfastboot flash vbmeta vbmeta.img`nfastboot flash vbmeta_system vbmeta_system.img"
 
           gh release create $tag $allFiles --title "XMAPort ${{ inputs.device }} $date #$n" --notes $notes --latest
 
